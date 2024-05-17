@@ -1,0 +1,6 @@
+r0 = syz_mnl_socket_open()
+r1 = syz_declare_char_array(0x2000)
+r2 = syz_mnl_nlmsg_batch_start(r1, 0x2000)
+r3 = syz_mnl_nlmsg_batch_head(r2)
+r4 = syz_mnl_nlmsg_batch_size(r2)
+syz_mnl_socket_sendto(r0, r3, r4)

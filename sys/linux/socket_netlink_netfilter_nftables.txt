@@ -15,6 +15,14 @@ include <uapi/linux/netfilter/nf_nat.h>
 include <uapi/linux/ip.h>
 include <net/netfilter/nf_tables.h>
 include <net/xfrm.h>
+include <libmnl/libmnl.h>
+include <libnftnl/table.h>
+include <libnftnl/rule.h>
+include <libnftnl/set.h>
+include <libnftnl/chain.h>
+include <linux/netfilter.h>
+include <linux/netfilter/nf_tables.h>
+include <linux/netfilter/nfnetlink.h>
 
 type msghdr_nf_tables[CMD, POLICY] msghdr_netlink[netlink_msg_netfilter_t[NFNL_SUBSYS_NFTABLES, CMD, POLICY]]
 # TODO: we should obtain them from somewhere, probably from other netlink messages,
@@ -32,6 +40,148 @@ sendmsg$NFT_MSG_GETOBJ_RESET(fd sock_nl_netfilter, msg ptr[in, msghdr_nf_tables[
 sendmsg$NFT_MSG_GETFLOWTABLE(fd sock_nl_netfilter, msg ptr[in, msghdr_nf_tables[NFT_MSG_GETFLOWTABLE, nft_flowtable_policy]], f flags[send_flags])
 
 sendmsg$NFT_BATCH(fd sock_nl_netfilter, msg ptr[in, msghdr_netlink[nft_batch_msg]], f flags[send_flags])
+
+resource mnl_sock[int32]
+resource mnl_nlmsg_batch[int32]
+resource nftnl_table[int32]
+resource nftnl_set[int32]
+resource nlmsghdr[int32]
+resource nftnl_expr[int32]
+resource nftnl_chain[int32]
+resource nftnl_set_elem[int32]
+resource nftnl_obj[int32]
+resource nftnl_rule[int32]
+resource buf[int32]
+resource size[int32]
+resource ret_recv[int32]
+resource ret_portid[int32]
+resource char_array[int32]
+resource int_array[int32]
+
+name = "syz0", "syz1"
+type nft_table_name string[name]
+type nft_chain_name string[name]
+type nft_set_name string[name]
+type nft_rule_name string[name]
+type nft_obj_name string[name]
+type nft_set_elem_list_name string[name]
+
+msg_flags = 0x400, 0x404, 0x604, 0x4
+type net_flags int16[msg_flags]
+type seqs int32[0:40]
+expr_policy = "lookup", "bitwise", "byteorder", "cmp", "dynset", "immediate"
+type policy string[expr_policy]
+set_flags = 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80
+type nft_set_flag int32[set_flags]
+
+syz_mnl_socket_open() mnl_sock
+syz_mnl_socket_close(sock mnl_sock)
+syz_mnl_socket_sendto(sock mnl_sock, buf_ptr buf, len size)
+syz_mnl_nlmsg_batch_start(buf_ptr char_array, limit len[buf_ptr]) mnl_nlmsg_batch
+syz_mnl_nlmsg_batch_current(b mnl_nlmsg_batch) buf
+syz_mnl_nlmsg_batch_next(b mnl_nlmsg_batch)
+syz_mnl_nlmsg_batch_head(b mnl_nlmsg_batch) buf
+syz_mnl_nlmsg_batch_size(b mnl_nlmsg_batch) size
+syz_nftnl_table_alloc() nftnl_table
+syz_nftnl_table_free(t nftnl_table)
+syz_nftnl_table_set_str(t nftnl_table, attr nftnl_table_attr, str ptr[in, nft_table_name])
+syz_nftnl_table_set_u32(t nftnl_table, attr nftnl_table_attr, val int32)
+syz_nftnl_table_nlmsg_build_hdr(b buf, type table_msg, f fam, flags net_flags, seq seqs) nlmsghdr
+syz_nftnl_set_alloc() nftnl_set
+syz_nftnl_set_set_str(s nftnl_set, attr nftnl_set_attr, str ptr[in, nft_set_name])
+syz_nftnl_set_set_u32(s nftnl_set, attr nftnl_set_attr, val int32)
+syz_nftnl_batch_begin(buf_ptr buf, seq seqs)
+syz_nftnl_table_nlmsg_build_payload(nlh nlmsghdr, t nftnl_table)
+syz_nftnl_set_nlmsg_build_payload(nlh nlmsghdr, s nftnl_set)
+syz_nftnl_set_set_data(s nftnl_set, attr nftnl_chain_attr, data_ptr ptr[in, array[int8]], len int32)
+syz_nftnl_set_free(s nftnl_set)
+syz_nftnl_batch_end(buf_ptr buf, seq seqs) nlmsghdr
+syz_nftnl_expr_alloc(name ptr[in, policy]) nftnl_expr
+syz_nftnl_expr_set_str(e nftnl_expr, type nftnl_expr_lookup_attr, str ptr[in, nft_set_name])
+syz_nftnl_expr_set_u32(e nftnl_expr, type nftnl_expr_lookup_attr, data seqs)
+syz_mnl_socket_get_fd(sock mnl_sock) fd
+syz_mnl_socket_get_portid(sock mnl_sock) ret_portid
+syz_mnl_socket_fdopen(f fd)
+syz_mnl_socket_bind(sock mnl_sock, groups int32, pid int32)
+syz_mnl_socket_recvfrom(sock mnl_sock, buf_ptr char_array, buf_size int32) ret_recv
+syz_mnl_socket_getsockopt(sock mnl_sock, type int32, buf_ptr int32, len int32)
+syz_nftnl_chain_alloc() nftnl_chain
+syz_nftnl_chain_free(c nftnl_chain)
+syz_nftnl_chain_set_data(c nftnl_chain, attr nftnl_chain_attr, data_ptr int32)
+syz_nftnl_chain_set_u32(c nftnl_chain, attr nftnl_chain_attr, data_ptr int32)
+syz_nftnl_chain_set_str(c nftnl_chain, attr nftnl_chain_attr, str ptr[in, nft_chain_name])
+syz_nftnl_expr_free(e nftnl_expr)
+syz_nftnl_expr_set(e nftnl_expr, type int32, data_ptr int32, data_len int32)
+
+syz_nftnl_set_elem_alloc() nftnl_set_elem
+syz_nftnl_set_elem_free(set_e nftnl_set_elem)
+syz_nftnl_set_elem_set(set_e nftnl_set_elem, attr nftnl_set_elem_attr, data_ptr int_array, data_len int32)
+syz_nftnl_set_elem_add(s nftnl_set, set_e nftnl_set_elem)
+syz_nftnl_set_elems_nlmsg_build_payload(nlh nlmsghdr, set_e nftnl_set_elem)
+syz_nftnl_set_elem_set_str(set_e nftnl_set_elem, attr nftnl_set_elem_attr, str ptr[in, nft_set_elem_list_name])
+
+syz_nftnl_rule_alloc() nftnl_rule
+syz_nftnl_rule_free(r nftnl_rule)
+syz_nftnl_rule_set_u32(r nftnl_rule, attr nftnl_rule_attr, val int32)
+syz_nftnl_rule_set_str(r nftnl_rule, attr nftnl_rule_attr, str ptr[in, nft_rule_name])
+syz_nftnl_rule_nlmsg_build_payload(nlh nlmsghdr, rule nftnl_rule)
+
+syz_mnl_cb_run(buf_ptr char_array, numbytes ret_recv, seq seqs, portid ret_portid, cb_data_ptr int32, data_ptr int32)
+
+syz_mnl_nlmsg_batch_stop(batch_ptr mnl_nlmsg_batch)
+syz_poc()
+syz_nftnl_chain_nlmsg_build_hdr(b buf, type chain_msg, f fam, flags net_flags, seq seqs) nlmsghdr
+syz_nftnl_set_nlmsg_build_hdr(b buf, type set_msg, f fam, flags net_flags, seq seqs) nlmsghdr
+syz_nftnl_chain_nlmsg_build_payload(nlh nlmsghdr, c nftnl_chain)
+syz_nftnl_rule_add_expr(r nftnl_rule, e nftnl_expr)
+syz_nftnl_rule_nlmsg_build_hdr(b buf, type rule_msg, f fam, flags net_flags, seq seqs) nlmsghdr
+syz_prepare_nftables(sock mnl_sock)
+syz_trigger_uaf(sock mnl_sock)
+syz_declare_mnl_batch_buffer()
+syz_set_table(table_name_ptr ptr[in, string]) nftnl_table
+syz_set_obj(table_name_ptr ptr[in, string], obj_name_ptr ptr[in, string]) nftnl_obj
+syz_set_set(table_name_ptr ptr[in, string], set_name_ptr ptr[in, string]) nftnl_set
+syz_set_elem(table_name_ptr ptr[in, string], obj_name_ptr ptr[in, string]) nftnl_set_elem
+syz_start_batch()
+syz_table_build_payload(t nftnl_table)
+syz_obj_build_payload(o nftnl_obj)
+syz_set_build_payload(s nftnl_set)
+syz_set_elem_build_payload(set nftnl_set)
+
+syz_nftnl_obj_alloc() nftnl_obj
+syz_nftnl_obj_set_str(obj nftnl_obj, attr nftnl_obj_attr, str ptr[in, nft_obj_name])
+syz_nftnl_obj_set_u32(obj nftnl_obj, attr nftnl_obj_attr, val int32)
+syz_nftnl_obj_set_u64(obj nftnl_obj, attr nftnl_obj_attr, val int32)
+
+syz_nftnl_nlmsg_build_hdr(nh nlmsghdr, type nftnl_msg, family fam, flags net_flags, seq seqs) nlmsghdr
+syz_nftnl_obj_nlmsg_build_payload(nh nlmsghdr, obj nftnl_obj)
+
+syz_declare_char_array(size int32) char_array
+syz_declare_int_array(size int32) int_array
+
+syz_create_table(b mnl_nlmsg_batch, table_name ptr[in, nft_table_name], family fam, seq seqs)
+syz_create_chain(b mnl_nlmsg_batch, table_name_ptr ptr[in, nft_table_name], chain_name_ptr ptr[in, nft_chain_name], family fam, seq seqs)
+syz_create_set(b mnl_nlmsg_batch, table_name_ptr ptr[in, nft_table_name], set_name_ptr ptr[in, nft_set_name], set_flags nft_set_flag, family fam, seq seqs)
+syz_create_rule_expr_lookup(b mnl_nlmsg_batch, table_name_ptr ptr[in, nft_table_name], chain_name_ptr ptr[in, nft_chain_name], set_name_ptr ptr[in, nft_set_name], reg nft_regs, family fam, seq seqs)
+syz_recvfrom_cb(nl_ptr mnl_sock, buf_ptr char_array, portid ret_portid, table_seq seqs)
+syz_sendto(nl_ptr mnl_sock, batch_ptr mnl_nlmsg_batch)
+syz_batch_begin(b mnl_nlmsg_batch, seq seqs)
+syz_batch_end(b mnl_nlmsg_batch, seq seqs)
+
+type nftnl_table_attr int32[0:7]
+type nftnl_chain_attr int32[0:16]
+type nftnl_set_attr int32[0:19]
+type nftnl_rule_attr int32[0:10]
+type nftnl_set_elem_attr int32[0:12]
+type nftnl_expr_lookup_attr int32[0:5]
+type nftnl_obj_attr int32[0:17]
+type table_msg int32[0:2]
+type chain_msg int32[3:5]
+type rule_msg int32[6:8]
+type set_msg int32[9:11]
+type nftnl_msg int32[0:20]
+type fam int32[1:2]
+type nft_regs int32[0:23]
 
 nft_batch_msg {
 	begin	nft_nlmsghdr[NFNL_MSG_BATCH_BEGIN]

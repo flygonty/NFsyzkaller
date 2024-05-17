@@ -1,0 +1,4 @@
+r2 = syz_nftnl_chain_alloc()
+syz_nftnl_chain_set_u32(r2, 0x1, 0x1)
+syz_nftnl_chain_set_str(r2, 0x2, &AUTO="syz0\x00")
+syz_nftnl_chain_set_str(r2, 0x0, &AUTO="syz0\x00")

@@ -1,0 +1,2 @@
+r0 = syz_nftnl_table_alloc()
+syz_nftnl_table_set_str(r0, 0x0, &AUTO='syz0\x00')

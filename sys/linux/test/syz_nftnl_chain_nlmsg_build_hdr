@@ -1,0 +1,6 @@
+yz_nftnl_chain_alloc()
+syz_nftnl_chain_set_u32(r2, 0x1, 0x1)
+syz_nftnl_chain_set_str(r2, 0x2, &AUTO="syz0\x00")
+syz_nftnl_chain_set_str(r2, 0x0, &AUTO="syz0\x00")
+r3 = syz_mnl_nlmsg_batch_current(r1)
+r4 = syz_nftnl_chain_nlmsg_build_hdr(r3, 0x3, 0x1, 0x404, 0x1)

@@ -1,0 +1,2 @@
+r0 = syz_nftnl_table_alloc()
+syz_nftnl_table_set_u32(r0, 0x1, 0x1)

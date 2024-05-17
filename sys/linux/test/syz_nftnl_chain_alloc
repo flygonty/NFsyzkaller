@@ -1,0 +1,1 @@
+r0 = syz_nftnl_chain_alloc()

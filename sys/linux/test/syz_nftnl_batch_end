@@ -1,0 +1,7 @@
+r0 = syz_declare_char_array(0x2000)
+r1 = syz_mnl_nlmsg_batch_start(r0, 0x2000)
+r2 = syz_mnl_nlmsg_batch_current(r1)
+syz_nftnl_batch_begin(r2, 0x1)
+syz_mnl_nlmsg_batch_next(r1)
+r3 = syz_mnl_nlmsg_batch_current(r1)
+syz_nftnl_batch_end(r3, 0x2)

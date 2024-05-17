@@ -1,0 +1,2 @@
+r0 = syz_mnl_socket_open()
+syz_mnl_socket_bind(r0, 0x0, 0x0)

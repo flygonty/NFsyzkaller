@@ -1,0 +1,4 @@
+r3 = syz_nftnl_expr_alloc(&AUTO='lookup\x00')
+syz_nftnl_expr_set_u32(r3, 0x1, 0x1)
+syz_nftnl_expr_set_str(r3, 0x1, &AUTO='syz0\x00')
+syz_nftnl_expr_set_u32(r3, 0x4, 0)

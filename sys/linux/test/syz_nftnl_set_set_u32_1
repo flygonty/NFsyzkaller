@@ -1,0 +1,7 @@
+r0 = syz_nftnl_set_alloc()
+syz_nftnl_set_set_str(r0, 0x0, &AUTO='syz0\x00')
+syz_nftnl_set_set_str(r0, 0x1, &AUTO='syz0\x00')
+syz_nftnl_set_set_u32(r0, 0x4, 0x1)
+syz_nftnl_set_set_u32(r0, 0x7, 0x2)
+syz_nftnl_set_set_u32(r0, 0x8, 0x2)
+

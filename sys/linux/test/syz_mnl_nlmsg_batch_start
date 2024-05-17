@@ -1,0 +1,2 @@
+r0 = syz_declare_char_array(0x2000)
+r1 = syz_mnl_nlmsg_batch_start(r0, 0x2000)

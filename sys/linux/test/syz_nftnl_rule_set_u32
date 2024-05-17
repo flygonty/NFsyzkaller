@@ -1,0 +1,2 @@
+r0 = syz_nftnl_rule_alloc()
+syz_nftnl_rule_set_u32(r0, 0x0, 0x1)

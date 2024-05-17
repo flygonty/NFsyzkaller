@@ -1,0 +1,2 @@
+r0 = syz_mnl_socket_open()
+r1 = syz_mnl_socket_get_portid(r0)

