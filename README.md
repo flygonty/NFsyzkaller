@@ -1,12 +1,10 @@
 ## Environment
 - Tested on Ubuntu 20.04.01
 
-## Installation using Docker
+## Installation
 
 ~~~~{.sh}
-# build docker image
-$ docker build -t sqsym_aeg:cs250 .
+# chekcout commit version
+$ git checkout 0ea90952bdac100bde3149fa2a7818ba7af943b4
 
-# run docker image
-$ docker run -it sqsym_aeg:cs250 /bin/bash
 ~~~~
