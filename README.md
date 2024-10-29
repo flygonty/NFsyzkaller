@@ -3,8 +3,7 @@
 
 ### Enable required config options
 
-Enable kernel config options required for syzkaller as described [here](kernel_configs.md).
-It's not required to enable all of them, but at the very least you need:
+Enable kernel config options required for NFsyzkaller
 
 ``` make
 # Coverage collection.
@@ -34,10 +33,10 @@ $ git checkout 0ea90952bdac100bde3149fa2a7818ba7af943b4
 
 ~~~~
 
-
+We use Go version 1.21.4
 ```
-wget https://dl.google.com/go/go1.22.1.linux-amd64.tar.gz
-tar -xf go1.22.1.linux-amd64.tar.gz
+wget https://dl.google.com/go/go1.21.4.linux-amd64.tar.gz
+tar -xf go1.21.4.linux-amd64.tar.gz
 export GOROOT=`pwd`/go
 export PATH=$GOROOT/bin:$PATH
 ```
