@@ -32,6 +32,9 @@ CONFIG_NF_TABLES=y
 # chekcout commit version
 $ git checkout 0ea90952bdac100bde3149fa2a7818ba7af943b4
 
+~~~~
+
+
 ```
 wget https://dl.google.com/go/go1.22.1.linux-amd64.tar.gz
 tar -xf go1.22.1.linux-amd64.tar.gz
@@ -47,4 +50,3 @@ cd NFsyzkaller
 make
 ```
 
-~~~~
