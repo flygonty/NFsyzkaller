@@ -44,7 +44,7 @@ export PATH=$GOROOT/bin:$PATH
 To download and build `NFsyzkaller`:
 
 ``` bash
-git clone https://github.com/google/syzkaller
+git clone https://github.com/flygonty/NFsyzkaller.git
 cd NFsyzkaller
 make
 ```
